@@ -1,5 +1,4 @@
 use std::env;
-
 mod open_file;
 mod process;
 mod ps_utils;
@@ -10,11 +9,25 @@ fn main() {
         println!("Usage: {} <name or pid of target>", args[0]);
         std::process::exit(1);
     }
-    #[allow(unused)] // TODO: delete this line for Milestone 1
     let target = &args[1];
 
     // TODO: Milestone 1: Get the target Process using psutils::get_target()
-    unimplemented!();
+    let opt_process = ps_utils::get_target(target).unwrap();
+    match opt_process {
+        Some(process) => {
+            process.print();
+            let child_processes =
+                ps_utils::get_child_processes(process.pid).expect("Cannot get child process");
+            for child_process in child_processes {
+                println!();
+                child_process.print();
+            }
+        },
+        None => {
+            println!("There is not any matching process called {}", target);
+            std::process::exit(1)
+        }
+    };
 }
 
 #[cfg(test)]

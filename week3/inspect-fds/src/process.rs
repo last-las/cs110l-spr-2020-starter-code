@@ -15,16 +15,59 @@ impl Process {
         Process { pid, ppid, command }
     }
 
+    pub fn print(&self) {
+        println!("========== \"{}\" (pid {}, ppid {}) ==========", self.command, self.pid, self.ppid);
+        match self.list_open_files() {
+            None => println!(
+                "Warning: could not inspect file descriptors for this process! \
+            It might have exited just as we were about to look at its fd table, \
+            or it might have exited a while ago and is waiting for the parent \
+            to reap it."
+            ),
+            Some(open_files) => {
+                for (fd, file) in open_files {
+                    println!(
+                        "{:<4} {:<15} cursor: {:<4} {}",
+                        fd,
+                        format!("({})", file.access_mode),
+                        file.cursor,
+                        file.colorized_name(),
+                    );
+                }
+            }
+        };
+    }
+
     /// This function returns a list of file descriptor numbers for this Process, if that
     /// information is available (it will return None if the information is unavailable). The
     /// information will commonly be unavailable if the process has exited. (Zombie processes
     /// still have a pid, but their resources have already been freed, including the file
     /// descriptor table.)
-    #[allow(unused)] // TODO: delete this line for Milestone 3
     pub fn list_fds(&self) -> Option<Vec<usize>> {
         // TODO: implement for Milestone 3
-        unimplemented!();
+        // 1. construct the directory
+        let dir = format!("/proc/{}/fd", self.pid);
+
+        // 2. open the directory
+        let dir_iter = fs::read_dir(dir).ok()?;
+
+        // 3. iterate the directory
+        let mut fds_list: Vec<usize> = Vec::new();
+
+        for entry in dir_iter {
+            let entry = entry.ok()?;
+            let filename = String::from(entry.file_name().to_string_lossy());
+            let fd_number = filename.parse::<usize>().ok()?;
+            fds_list.push(fd_number);
+        }
+
+        if fds_list.is_empty() {
+            None
+        } else {
+            Some(fds_list)
+        }
     }
+
 
     /// This function returns a list of (fdnumber, OpenFile) tuples, if file descriptor
     /// information is available (it returns None otherwise). The information is commonly

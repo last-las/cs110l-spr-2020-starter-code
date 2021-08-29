@@ -2,21 +2,51 @@ use linked_list::LinkedList;
 pub mod linked_list;
 
 fn main() {
-    let mut list: LinkedList<u32> = LinkedList::new();
-    assert!(list.is_empty());
-    assert_eq!(list.get_size(), 0);
-    for i in 1..12 {
-        list.push_front(i);
-    }
-    println!("{}", list);
-    println!("list size: {}", list.get_size());
-    println!("top element: {}", list.pop_front().unwrap());
-    println!("{}", list);
-    println!("size: {}", list.get_size());
-    println!("{}", list.to_string()); // ToString impl for anything impl Display
 
-    // If you implement iterator trait:
-    //for val in &list {
-    //    println!("{}", val);
-    //}
+}
+
+#[cfg(test)]
+mod test{
+    use crate::linked_list::{LinkedList, ComputeNorm};
+
+    #[test]
+    fn test_into_iterator() {
+        let mut  list = LinkedList::new();
+
+        for i in 1..12 {
+            list.push_front(i);
+        }
+
+        let mut s = String::new();
+        for e in list {
+            s = format!("{} {}", e, s);
+        }
+        println!("{}", s);
+    }
+
+    #[test]
+    fn test_into_iterator_ampersand() {
+        let mut  list = LinkedList::new();
+
+        for i in 1..12 {
+            list.push_front(i);
+        }
+
+        let mut s = String::new();
+        for e in &list {
+            s = format!("{} {}", s, e);
+        }
+        assert_eq!(s.trim(), format!("{}", list).trim());
+    }
+
+    #[test]
+    fn test_compute_norm() {
+        let mut list:LinkedList<f64> = LinkedList::new();
+
+        for i in 1..12{
+            list.push_front(i as f64);
+        }
+
+        assert_eq!(list.compute_norm(), 66 as f64);
+    }
 }
