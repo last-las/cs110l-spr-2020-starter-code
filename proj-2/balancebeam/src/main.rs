@@ -1,42 +1,65 @@
 mod request;
 mod response;
 
-use clap::Clap;
+use clap::{Clap, App, Arg};
 use rand::{Rng, SeedableRng};
 use std::net::{TcpListener, TcpStream};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
-#[derive(Clap, Debug)]
-#[clap(about = "Fun with load balancing")]
+#[derive(Debug)]
 struct CmdOptions {
-    #[clap(
-        short,
-        long,
-        about = "IP/port to bind to",
-        default_value = "0.0.0.0:1100"
-    )]
     bind: String,
-    #[clap(short, long, about = "Upstream host to forward requests to")]
     upstream: Vec<String>,
-    #[clap(
-        long,
-        about = "Perform active health checks on this interval (in seconds)",
-        default_value = "10"
-    )]
     active_health_check_interval: usize,
-    #[clap(
-    long,
-    about = "Path to send request to for active health checks",
-    default_value = "/"
-    )]
     active_health_check_path: String,
-    #[clap(
-        long,
-        about = "Maximum number of requests to accept per IP per minute (0 = unlimited)",
-        default_value = "0"
-    )]
     max_requests_per_minute: usize,
+}
+
+fn construct_cmd_options() -> CmdOptions {
+    let matches = App::new("Fun with load balancing")
+        .arg(Arg::new("bind")
+            .short('b')
+            .long("bind")
+            .about("IP/port to bind to")
+            .default_value("0.0.0.0:1100"))
+        .arg(Arg::new("upstream")
+            .short('u')
+            .long("upstream")
+            .about("Upstream host to forward requests to")
+            .takes_value(true)
+            .multiple_values(true)
+            .multiple_occurrences(true)
+            .required(true))
+        .arg(Arg::new("active_health_check_interval")
+            .long("active_health_check_interval")
+            .about("Perform active health checks on this interval (in seconds)")
+            .default_value("10"))
+        .arg(Arg::new("active_health_check_path")
+            .long("active_health_check_path")
+            .about("Path to send request to for active health checks")
+            .default_value("/"))
+        .arg(Arg::new("max_requests_per_minute")
+            .long("max_requests_per_minute")
+            .about("Maximum number of requests to accept per IP per minute(0 = unlimited)")
+            .default_value("0"))
+        .get_matches();
+
+    let bind = matches.value_of("bind").unwrap().to_string();
+    let upstream = matches.values_of_lossy("upstream").unwrap();
+    let active1 = matches.value_of("active_health_check_interval")
+        .unwrap().parse::<usize>().unwrap();
+    let active2 = matches.value_of("active_health_check_path").unwrap().to_string();
+    let max_requests_per_m = matches.value_of("max_requests_per_minute")
+        .unwrap().parse::<usize>().unwrap();
+
+    CmdOptions {
+        bind,
+        upstream,
+        active_health_check_interval: active1,
+        active_health_check_path: active2,
+        max_requests_per_minute: max_requests_per_m
+    }
 }
 
 /// Contains information about the state of balancebeam (e.g. what servers we are currently proxying
@@ -67,7 +90,7 @@ fn main() {
     pretty_env_logger::init();
 
     // Parse the command line arguments passed to this program
-    let options = CmdOptions::parse();
+    let options = construct_cmd_options();
     if options.upstream.len() < 1 {
         log::error!("At least one upstream server must be specified using the --upstream option.");
         std::process::exit(1);
