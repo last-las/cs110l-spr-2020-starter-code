@@ -8,6 +8,7 @@ use std::thread::Thread;
 use std::thread;
 use std::sync::Arc;
 use parking_lot::{Mutex, RawMutex};
+use threadpool::ThreadPool;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -120,19 +121,16 @@ fn main() {
 
     let mutex_state = Arc::new(Mutex::new(state));
 
-    let mut threads = Vec::new();
+    let thread_pool = ThreadPool::new(num_cpus::get());
+
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             // Handle the connection!
             let mutex_state_clone = mutex_state.clone();
-            threads.push(thread::spawn(|| {
+            thread_pool.execute(|| {
                 handle_connection(stream, mutex_state_clone);
-            }));
+            });
         }
-    }
-
-    for thread in threads {
-        thread.join();
     }
 }
 
