@@ -4,6 +4,10 @@ mod response;
 use clap::{Clap, App, Arg};
 use rand::{Rng, SeedableRng};
 use std::net::{TcpListener, TcpStream};
+use std::thread::Thread;
+use std::thread;
+use std::sync::Arc;
+use parking_lot::{Mutex, RawMutex};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -113,16 +117,28 @@ fn main() {
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
+
+    let mutex_state = Arc::new(Mutex::new(state));
+
+    let mut threads = Vec::new();
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             // Handle the connection!
-            handle_connection(stream, &state);
+            let mutex_state_clone = mutex_state.clone();
+            threads.push(thread::spawn(|| {
+                handle_connection(stream, mutex_state_clone);
+            }));
         }
+    }
+
+    for thread in threads {
+        thread.join();
     }
 }
 
-fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+fn connect_to_upstream(mutex_state: Arc<Mutex<ProxyState>>) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
+    let state = mutex_state.lock();
     let upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
     let upstream_ip = &state.upstream_addresses[upstream_idx];
     TcpStream::connect(upstream_ip).or_else(|err| {
@@ -141,7 +157,7 @@ fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>
     }
 }
 
-fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
+fn handle_connection(mut client_conn: TcpStream, state: Arc<Mutex<ProxyState>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
