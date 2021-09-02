@@ -6,6 +6,7 @@ use rand::{Rng, SeedableRng};
 use tokio::net::{TcpListener, TcpStream};
 use std::sync::{Arc};
 use tokio::sync::RwLock;
+use tokio::time::{delay_for, Duration};
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -33,26 +34,26 @@ fn construct_cmd_options() -> CmdOptions {
             .multiple_values(true)
             .multiple_occurrences(true)
             .required(true))
-        .arg(Arg::new("active_health_check_interval")
-            .long("active_health_check_interval")
+        .arg(Arg::new("active-health-check-interval")
+            .long("active-health-check-interval")
             .about("Perform active health checks on this interval (in seconds)")
             .default_value("10"))
-        .arg(Arg::new("active_health_check_path")
-            .long("active_health_check_path")
+        .arg(Arg::new("active-health-check-path")
+            .long("active-health-check-path")
             .about("Path to send request to for active health checks")
             .default_value("/"))
-        .arg(Arg::new("max_requests_per_minute")
-            .long("max_requests_per_minute")
+        .arg(Arg::new("max-requests-per-minute")
+            .long("max-requests-per-minute")
             .about("Maximum number of requests to accept per IP per minute(0 = unlimited)")
             .default_value("0"))
         .get_matches();
 
     let bind = matches.value_of("bind").unwrap().to_string();
     let upstream = matches.values_of_lossy("upstream").unwrap();
-    let active1 = matches.value_of("active_health_check_interval")
+    let active1 = matches.value_of("active-health-check-interval")
         .unwrap().parse::<usize>().unwrap();
-    let active2 = matches.value_of("active_health_check_path").unwrap().to_string();
-    let max_requests_per_m = matches.value_of("max_requests_per_minute")
+    let active2 = matches.value_of("active-health-check-path").unwrap().to_string();
+    let max_requests_per_m = matches.value_of("max-requests-per-minute")
         .unwrap().parse::<usize>().unwrap();
 
     CmdOptions {
@@ -121,6 +122,11 @@ async fn main() {
     };
 
     let mutex_state = Arc::new(RwLock::new(state));
+    let state_copy = mutex_state.clone();
+
+    tokio::spawn(async {
+        upstreams_active_health_check(state_copy).await;
+    });
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
@@ -129,6 +135,93 @@ async fn main() {
             handle_connection(stream, state_copy).await;
         });
     };
+}
+
+async fn upstreams_active_health_check(lock_state: Arc<RwLock<ProxyState>>) {
+    let active_health_check_interval;
+    let active_health_check_path;
+    {
+        let state = lock_state.read().await;
+        active_health_check_interval = state.active_health_check_interval as u64;
+        active_health_check_path = state.active_health_check_path.clone();
+    }
+
+    loop {
+        delay_for(Duration::from_secs(active_health_check_interval)).await;
+
+        let mut flag: bool = false;
+        let mut active_upstream_addresses = Vec::new();
+        let mut passive_upstream_addresses = Vec::new();
+        {
+            let state = lock_state.read().await;
+            let len1 = state.upstream_addresses.len();
+            let len2 = state.failed_upstream_addresses.len();
+            for i in 0..len1 + len2 {
+                let cur_address;
+
+                if i >= len1 {
+                    cur_address = &state.failed_upstream_addresses[i - len1];
+                } else {
+                    cur_address = &state.upstream_addresses[i];
+                }
+                match perform_check_on_address(cur_address, &active_health_check_path).await {
+                    Err(_) => {
+                        if i < len1 {
+                            flag = true;
+                        }
+                        passive_upstream_addresses.push(
+                            String::from(cur_address)
+                        );
+                    }
+                    Ok(_) => {
+                        if i >= len1 {
+                            flag = true;
+                        }
+                        active_upstream_addresses.push(
+                            String::from(cur_address)
+                        );
+                    }
+                }
+            }
+        }
+
+        if flag {
+            let mut state = lock_state.write().await;
+            state.upstream_addresses = active_upstream_addresses;
+            state.failed_upstream_addresses = passive_upstream_addresses;
+        }
+    }
+}
+
+async fn perform_check_on_address(address: &str, path: &str) -> Result<(), &'static str> {
+    // 1. build an upstream
+    match TcpStream::connect(address).await {
+        Ok( mut upstream) => {
+            let request = http::Request::builder()
+                .method(http::Method::GET)
+                .uri(path)
+                .header("Host", address)
+                .body(Vec::new())
+                .unwrap();
+
+            request::write_to_stream(&request, &mut upstream).await.unwrap();
+            let result = response::read_from_stream(
+                &mut upstream, request.method()).await;
+            if result.is_ok() {
+                let response = response::format_response_line(&result.unwrap());
+                if response.contains("HTTP/1.1 200 OK") {
+                    Ok(())
+                }else {
+                    Err("Upstream didn't return 200 status code.")
+                }
+            }else {
+                Err("")
+            }
+        },
+        Err(_) => {
+            Err("Cannot create socket.")
+        }
+    }
 }
 
 async fn connect_to_upstream(mutex_state: Arc<RwLock<ProxyState>>) -> Result<TcpStream, &'static str> {
