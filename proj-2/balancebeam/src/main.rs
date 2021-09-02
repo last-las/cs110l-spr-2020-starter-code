@@ -5,7 +5,7 @@ use clap::{App, Arg};
 use rand::{Rng, SeedableRng};
 use tokio::net::{TcpListener, TcpStream};
 use std::sync::{Arc};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -60,7 +60,7 @@ fn construct_cmd_options() -> CmdOptions {
         upstream,
         active_health_check_interval: active1,
         active_health_check_path: active2,
-        max_requests_per_minute: max_requests_per_m
+        max_requests_per_minute: max_requests_per_m,
     }
 }
 
@@ -80,6 +80,8 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
+    /// Addresses of servers that we are proxying to but failed right now
+    failed_upstream_addresses: Vec<String>,
 }
 
 #[tokio::main]
@@ -115,12 +117,13 @@ async fn main() {
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
+        failed_upstream_addresses: Vec::new(),
     };
 
-    let mutex_state = Arc::new(Mutex::new(state));
+    let mutex_state = Arc::new(RwLock::new(state));
 
     loop {
-      let (stream, _) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         let state_copy = mutex_state.clone();
         tokio::spawn(async move {
             handle_connection(stream, state_copy).await;
@@ -128,16 +131,31 @@ async fn main() {
     };
 }
 
-async fn connect_to_upstream(mutex_state: Arc<Mutex<ProxyState>>) -> Result<TcpStream, std::io::Error> {
-    let mut rng = rand::rngs::StdRng::from_entropy();
-    let state = mutex_state.lock().await;
-    let upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
-    let upstream_ip = &state.upstream_addresses[upstream_idx];
-    TcpStream::connect(upstream_ip).await.or_else(|err| {
-        log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
-    })
-    // TODO: implement failover (milestone 3)
+async fn connect_to_upstream(mutex_state: Arc<RwLock<ProxyState>>) -> Result<TcpStream, &'static str> {
+    loop {
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let upstream_idx: usize;
+        let upstream_ip: String;
+        {
+            let state = mutex_state.read().await;
+
+            if state.upstream_addresses.len() == 0 {
+                return Err("No available upstreams right now.");
+            }
+            upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
+            upstream_ip = String::from(&state.upstream_addresses[upstream_idx]);
+        }
+
+        let result = TcpStream::connect(&upstream_ip).await;
+
+        if result.is_ok() {
+            return Ok(result.unwrap());
+        } else {
+            let mut state = mutex_state.write().await;
+            state.upstream_addresses.remove(upstream_idx);
+            state.failed_upstream_addresses.push(upstream_ip);
+        }
+    }
 }
 
 async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
@@ -149,7 +167,7 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: Arc<Mutex<ProxyState>>) {
+async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxyState>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
