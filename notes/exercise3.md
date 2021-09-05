@@ -1,0 +1,1 @@
+关于Iterator：存在一个struct是`LinkedList<T>`，如果它实现了`Iterator`，那么它将自动实现`IntoIterator`。
