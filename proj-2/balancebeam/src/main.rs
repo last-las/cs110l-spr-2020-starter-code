@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use std::sync::{Arc};
 use tokio::sync::RwLock;
 use tokio::time::{delay_for, Duration};
+use std::collections::HashMap;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -83,6 +84,8 @@ struct ProxyState {
     upstream_addresses: Vec<String>,
     /// Addresses of servers that we are proxying to but failed right now
     failed_upstream_addresses: Vec<String>,
+    /// requests count for each ip address per minute
+    requests_cnt_map: HashMap<String, usize>
 }
 
 #[tokio::main]
@@ -119,6 +122,7 @@ async fn main() {
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
         failed_upstream_addresses: Vec::new(),
+        requests_cnt_map: HashMap::new()
     };
 
     let mutex_state = Arc::new(RwLock::new(state));
@@ -127,6 +131,12 @@ async fn main() {
     tokio::spawn(async {
         upstreams_active_health_check(state_copy).await;
     });
+
+    // task which clear the counter for each address per minute
+    let state_copy = mutex_state.clone();
+    tokio::spawn(
+        clear_counter(state_copy)
+    );
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
@@ -224,6 +234,14 @@ async fn perform_check_on_address(address: &str, path: &str) -> Result<(), &'sta
     }
 }
 
+async fn clear_counter(lock_state: Arc<RwLock<ProxyState>>) {
+    loop {
+        delay_for(Duration::from_secs(60)).await;
+        let mut state = lock_state.write().await;
+        state.requests_cnt_map.clear();
+    }
+}
+
 async fn connect_to_upstream(mutex_state: Arc<RwLock<ProxyState>>) -> Result<TcpStream, &'static str> {
     loop {
         let mut rng = rand::rngs::StdRng::from_entropy();
@@ -265,7 +283,7 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(state).await {
+    let mut upstream_conn = match connect_to_upstream(state.clone()).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
@@ -279,8 +297,20 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
     // client hangs up or we get an error.
     loop {
         // Read a request from the client
-        let mut request = match request::read_from_stream(&mut client_conn).await {
-            Ok(request) => request,
+        let request = request::read_from_stream(&mut client_conn).await;
+
+        let mut request = match request{
+            Ok(request) => {
+                // Check the windows size for client_ip
+                let copy_state = state.clone();
+                if !check_fixed_windows_for_ip(&client_ip,copy_state).await {
+                    let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+                    send_response(&mut client_conn, &response).await;
+                    return;
+                }
+
+                request
+            },
             // Handle case where client closed connection and is no longer sending requests
             Err(request::Error::IncompleteRequest(0)) => {
                 log::debug!("Client finished sending requests. Shutting down connection");
@@ -339,5 +369,31 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
         // Forward the response to the client
         send_response(&mut client_conn, &response).await;
         log::debug!("Forwarded response to client");
+    }
+}
+
+async fn check_fixed_windows_for_ip(client_ip: &str, lock_state: Arc<RwLock<ProxyState>>) -> bool {
+    let mut state = lock_state.write().await;
+    // if max_requests_per_minute is zero then always return true
+    if state.max_requests_per_minute == 0 {
+        return true;
+    }
+
+    let cnt = state.requests_cnt_map.get(client_ip);
+    match cnt {
+        Some(cnt) => {
+            println!("{:?}", state.requests_cnt_map);
+            let val = cnt.clone() + 1;
+            if val > state.max_requests_per_minute {
+                return false;
+            }else {
+                state.requests_cnt_map.insert(client_ip.to_string(), val);
+                return true;
+            }
+        },
+        None => {
+            state.requests_cnt_map.insert(client_ip.to_string(), 1);
+            return true;
+        }
     }
 }
